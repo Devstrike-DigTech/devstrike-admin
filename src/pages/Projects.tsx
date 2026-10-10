@@ -1,270 +1,280 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, Paginated } from '../lib/api';
+import { useMemo, useState } from 'react';
+import { LuExternalLink, LuFolderKanban, LuPencil, LuPlus, LuTrash2 } from 'react-icons/lu';
+import Drawer, { isDirty } from '../components/Drawer';
+import { useConfirm, useToast } from '../components/feedback';
+import { Row, Thumb } from '../components/Row';
 import {
+  Badge,
   Button,
+  EmptyState,
   ErrorNote,
   Field,
+  FilterTabs,
+  FormSection,
+  GalleryField,
+  IconButton,
   ImageField,
   LinesField,
-  Modal,
+  ListSkeleton,
   PageHeader,
-  inputClass,
+  SearchInput,
+  Toolbar,
 } from '../components/ui';
+import { api, errorMessage, resolveImage, SITE_URL } from '../lib/api';
+import { matches, pick, slugify } from '../lib/format';
+import { useList, useOpenNewFromQuery, useSession } from '../lib/session';
+import type { Project } from '../lib/types';
 
-interface Project {
-  id: string;
-  slug: string;
-  title: string;
-  summary: string;
-  description: string;
-  identity: string;
-  motive: string;
-  featuresIntro: string;
-  features: string[];
-  status: string;
-  industry: string;
-  websiteUrl?: string;
-  investUrl?: string;
-  coverImage?: string;
-  images: string[];
-  openVacancies?: number;
-}
+type Draft = Omit<Project, 'id' | 'openVacancies'> & { id?: string };
 
-const empty: Omit<Project, 'id'> = {
-  slug: '',
-  title: '',
-  summary: '',
-  description: '',
-  identity: '',
-  motive: '',
-  featuresIntro: '',
-  features: [],
-  status: 'ongoing',
-  industry: 'Technology',
-  websiteUrl: '',
-  investUrl: '',
-  coverImage: '',
-  images: [],
+const FIELDS = [
+  'slug', 'title', 'summary', 'description', 'identity', 'motive', 'featuresIntro',
+  'features', 'status', 'industry', 'websiteUrl', 'investUrl', 'coverImage', 'images',
+] as const;
+
+const EMPTY: Draft = {
+  slug: '', title: '', summary: '', description: '', identity: '', motive: '',
+  featuresIntro: '', features: [], status: 'ongoing', industry: '',
+  websiteUrl: '', investUrl: '', coverImage: '', images: [],
 };
 
-const slugify = (s: string) =>
-  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const STATUS_TONE = { ongoing: 'green', upcoming: 'amber', concluded: 'slate' } as const;
+type Filter = 'all' | Project['status'];
 
 export default function ProjectsPage() {
-  const [data, setData] = useState<Paginated<Project> | null>(null);
-  const [editing, setEditing] = useState<Partial<Project> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { items, loading, error, reload } = useList<Project>('/projects?limit=50');
+  const { refreshStats } = useSession();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [filter, setFilter] = useState<Filter>('all');
+  const [query, setQuery] = useState('');
+  const [original, setOriginal] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setData(await api<Paginated<Project>>('/projects?limit=50'));
-  }, []);
+  const open = (project?: Project) => {
+    const value: Draft = project ? { id: project.id, ...pick({ ...EMPTY, ...project }, FIELDS) } : { ...EMPTY };
+    setOriginal(value);
+    setDraft(value);
+    setSaveError(null);
+  };
+  useOpenNewFromQuery(() => open());
 
-  useEffect(() => {
-    load().catch((e) => setError(e.message));
-  }, [load]);
+  const industries = useMemo(() => [...new Set(items.map((p) => p.industry))].sort(), [items]);
+  const visible = items.filter(
+    (p) => (filter === 'all' || p.status === filter) && matches(query, p.title, p.industry, p.summary),
+  );
+  const count = (status: Filter) => (status === 'all' ? items.length : items.filter((p) => p.status === status).length);
+
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => (d ? { ...d, [key]: value } : d));
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!draft) return;
     setSaving(true);
-    setError(null);
+    setSaveError(null);
     try {
-      const body = JSON.stringify({ ...editing, id: undefined, openVacancies: undefined });
-      if (editing.id) {
-        await api(`/projects/${editing.id}`, { method: 'PATCH', body });
-      } else {
-        await api('/projects', { method: 'POST', body });
-      }
-      setEditing(null);
-      await load();
+      const body = JSON.stringify(pick(draft, FIELDS));
+      if (draft.id) await api(`/projects/${draft.id}`, { method: 'PATCH', body });
+      else await api('/projects', { method: 'POST', body });
+      toast(draft.id ? `“${draft.title}” saved.` : `“${draft.title}” created.`);
+      setDraft(null);
+      reload();
+      refreshStats();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed');
+      setSaveError(errorMessage(err, 'Save failed'));
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async (project: Project) => {
-    if (!confirm(`Delete "${project.title}" and its vacancies?`)) return;
-    await api(`/projects/${project.id}`, { method: 'DELETE' });
-    await load();
+    const roles = project.openVacancies ?? 0;
+    const ok = await confirm({
+      title: `Delete “${project.title}”?`,
+      message: `This removes the project${roles ? ` and its ${roles} vacanc${roles === 1 ? 'y' : 'ies'}` : ''} from the website. This can't be undone.`,
+      confirmLabel: 'Delete project',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/projects/${project.id}`, { method: 'DELETE' });
+      toast(`“${project.title}” deleted.`);
+      reload();
+      refreshStats();
+    } catch (err) {
+      toast(errorMessage(err, 'Delete failed'), 'error');
+    }
   };
 
   return (
     <div>
       <PageHeader
-        title="Projects"
-        action={<Button onClick={() => setEditing({ ...empty })}>New Project</Button>}
+        title='Projects'
+        description='Products shown on the Projects page and home page.'
+        actions={
+          <Button onClick={() => open()}>
+            <LuPlus className='h-4 w-4' /> New project
+          </Button>
+        }
       />
-      {!editing && <ErrorNote error={error} />}
+      <ErrorNote error={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-gray-100 text-xs uppercase text-gray-500">
-            <tr>
-              <th className="px-4 py-3">Title</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Industry</th>
-              <th className="px-4 py-3">Open roles</th>
-              <th className="px-4 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {data?.items.map((project) => (
-              <tr key={project.id} className="border-b border-gray-50">
-                <td className="px-4 py-3 font-medium">{project.title}</td>
-                <td className="px-4 py-3 capitalize">{project.status}</td>
-                <td className="px-4 py-3">{project.industry}</td>
-                <td className="px-4 py-3">{project.openVacancies ?? 0}</td>
-                <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" onClick={() => setEditing(project)}>
-                    Edit
-                  </Button>{' '}
-                  <Button variant="danger" onClick={() => remove(project)}>
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {data && data.items.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-4 py-10 text-center text-gray-500">
-                  No projects yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <Toolbar>
+        <FilterTabs<Filter>
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { label: 'All', value: 'all', count: count('all') },
+            { label: 'Ongoing', value: 'ongoing', count: count('ongoing') },
+            { label: 'Upcoming', value: 'upcoming', count: count('upcoming') },
+            { label: 'Concluded', value: 'concluded', count: count('concluded') },
+          ]}
+        />
+        <SearchInput value={query} onChange={setQuery} placeholder='Search projects' />
+      </Toolbar>
 
-      {editing && (
-        <Modal
-          title={editing.id ? 'Edit Project' : 'New Project'}
-          onClose={() => setEditing(null)}
+      {loading ? (
+        <ListSkeleton />
+      ) : visible.length === 0 ? (
+        <EmptyState
+          icon={LuFolderKanban}
+          title={items.length ? 'No matching projects' : 'No projects yet'}
+          description={items.length ? 'Try a different filter or search.' : 'Add your first product to show it on the website.'}
+          action={!items.length && <Button onClick={() => open()}>New project</Button>}
+        />
+      ) : (
+        <ul className='space-y-2.5'>
+          {visible.map((project, i) => (
+            <Row
+              key={project.id}
+              index={i}
+              onOpen={() => open(project)}
+              thumb={<Thumb src={resolveImage(project.coverImage)} fallback={project.title} />}
+              title={project.title}
+              subtitle={project.summary}
+              meta={
+                <>
+                  <Badge tone={STATUS_TONE[project.status]} dot>
+                    {project.status}
+                  </Badge>
+                  <Badge tone='violet'>{project.industry}</Badge>
+                  {(project.openVacancies ?? 0) > 0 && (
+                    <Badge tone='pink'>
+                      {project.openVacancies} open role{project.openVacancies === 1 ? '' : 's'}
+                    </Badge>
+                  )}
+                </>
+              }
+              actions={
+                <>
+                  <a
+                    href={`${SITE_URL}/projects/${project.slug}`}
+                    target='_blank'
+                    rel='noopener noreferrer'
+                    aria-label='View on site'
+                    title='View on site'
+                    className='hidden h-9 w-9 items-center justify-center rounded-xl text-ink/45 hover:bg-ink/[0.05] hover:text-ink sm:flex'
+                  >
+                    <LuExternalLink className='h-4 w-4' />
+                  </a>
+                  <IconButton label='Edit' onClick={() => open(project)}>
+                    <LuPencil className='h-4 w-4' />
+                  </IconButton>
+                  <IconButton label='Delete' tone='danger' onClick={() => remove(project)}>
+                    <LuTrash2 className='h-4 w-4' />
+                  </IconButton>
+                </>
+              }
+            />
+          ))}
+        </ul>
+      )}
+
+      {draft && (
+        <Drawer
+          title={draft.id ? 'Edit project' : 'New project'}
+          subtitle={draft.id ? draft.title : 'Shown on the public Projects page once saved.'}
+          dirty={isDirty(original, draft)}
+          saving={saving}
+          error={saveError}
+          onClose={() => setDraft(null)}
+          onSubmit={save}
+          submitLabel={draft.id ? 'Save changes' : 'Create project'}
         >
-          <ErrorNote error={error} />
-          <form onSubmit={save} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Title">
+          <FormSection title='Basics'>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <Field label='Title'>
                 <input
-                  className={inputClass}
-                  value={editing.title ?? ''}
+                  className='input'
+                  value={draft.title}
                   onChange={(e) =>
-                    setEditing({
-                      ...editing,
-                      title: e.target.value,
-                      slug: editing.id ? editing.slug : slugify(e.target.value),
-                    })
+                    setDraft({ ...draft, title: e.target.value, slug: draft.id ? draft.slug : slugify(e.target.value) })
                   }
                   required
+                  minLength={2}
                 />
               </Field>
-              <Field label="Slug">
-                <input
-                  className={inputClass}
-                  value={editing.slug ?? ''}
-                  onChange={(e) => setEditing({ ...editing, slug: e.target.value })}
-                  required
-                />
+              <Field label='URL slug' hint={`/projects/${draft.slug || '…'}`}>
+                <input className='input' value={draft.slug} onChange={(e) => set('slug', slugify(e.target.value))} required minLength={2} />
               </Field>
-              <Field label="Status">
-                <select
-                  className={inputClass}
-                  value={editing.status ?? 'ongoing'}
-                  onChange={(e) => setEditing({ ...editing, status: e.target.value })}
-                >
-                  <option value="ongoing">Ongoing</option>
-                  <option value="upcoming">Upcoming</option>
-                  <option value="concluded">Concluded</option>
+              <Field label='Status'>
+                <select className='input' value={draft.status} onChange={(e) => set('status', e.target.value as Project['status'])}>
+                  <option value='ongoing'>Ongoing</option>
+                  <option value='upcoming'>Upcoming</option>
+                  <option value='concluded'>Concluded</option>
                 </select>
               </Field>
-              <Field label="Industry">
-                <input
-                  className={inputClass}
-                  value={editing.industry ?? ''}
-                  onChange={(e) => setEditing({ ...editing, industry: e.target.value })}
-                />
-              </Field>
-              <Field label="Website URL">
-                <input
-                  className={inputClass}
-                  value={editing.websiteUrl ?? ''}
-                  onChange={(e) => setEditing({ ...editing, websiteUrl: e.target.value })}
-                />
-              </Field>
-              <Field label="Invest URL">
-                <input
-                  className={inputClass}
-                  value={editing.investUrl ?? ''}
-                  onChange={(e) => setEditing({ ...editing, investUrl: e.target.value })}
-                />
+              <Field label='Industry' hint='Pick an existing one or type a new one.'>
+                <input className='input' list='industries' value={draft.industry} onChange={(e) => set('industry', e.target.value)} required />
+                <datalist id='industries'>
+                  {industries.map((i) => (
+                    <option key={i} value={i} />
+                  ))}
+                </datalist>
               </Field>
             </div>
+          </FormSection>
 
-            <Field label="Summary (card blurb)">
-              <textarea
-                className={`${inputClass} min-h-[60px]`}
-                value={editing.summary ?? ''}
-                onChange={(e) => setEditing({ ...editing, summary: e.target.value })}
-                required
-              />
+          <FormSection title='Content' description='Text shown on the project card and detail page. Blank lines start new paragraphs.'>
+            <Field label='Summary' hint={`${draft.summary.length} characters — shown on cards, aim for under 180.`}>
+              <textarea className='input min-h-[80px] resize-y' value={draft.summary} onChange={(e) => set('summary', e.target.value)} required />
             </Field>
-            <Field label="Description (detail page intro)">
-              <textarea
-                className={`${inputClass} min-h-[90px]`}
-                value={editing.description ?? ''}
-                onChange={(e) => setEditing({ ...editing, description: e.target.value })}
-                required
-              />
+            <Field label='Description'>
+              <textarea className='input min-h-[140px] resize-y leading-relaxed' value={draft.description} onChange={(e) => set('description', e.target.value)} required />
             </Field>
-            <Field label="Project Identity">
-              <textarea
-                className={`${inputClass} min-h-[70px]`}
-                value={editing.identity ?? ''}
-                onChange={(e) => setEditing({ ...editing, identity: e.target.value })}
-              />
+            <Field label='Project identity'>
+              <textarea className='input min-h-[100px] resize-y leading-relaxed' value={draft.identity} onChange={(e) => set('identity', e.target.value)} />
             </Field>
-            <Field label="Project Motive">
-              <textarea
-                className={`${inputClass} min-h-[70px]`}
-                value={editing.motive ?? ''}
-                onChange={(e) => setEditing({ ...editing, motive: e.target.value })}
-              />
+            <Field label='Project motive'>
+              <textarea className='input min-h-[100px] resize-y leading-relaxed' value={draft.motive} onChange={(e) => set('motive', e.target.value)} />
             </Field>
-            <Field label="Features intro">
-              <input
-                className={inputClass}
-                value={editing.featuresIntro ?? ''}
-                onChange={(e) => setEditing({ ...editing, featuresIntro: e.target.value })}
-              />
-            </Field>
-            <LinesField
-              label="Features"
-              value={editing.features ?? []}
-              onChange={(features) => setEditing({ ...editing, features })}
-            />
-            <ImageField
-              label="Cover image"
-              value={editing.coverImage}
-              onChange={(coverImage) => setEditing({ ...editing, coverImage })}
-            />
-            <LinesField
-              label="Gallery image URLs"
-              value={editing.images ?? []}
-              onChange={(images) => setEditing({ ...editing, images })}
-            />
+          </FormSection>
 
-            <div className="flex justify-end gap-3 pt-2">
-              <Button type="button" variant="ghost" onClick={() => setEditing(null)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={saving}>
-                {saving ? 'Saving…' : 'Save'}
-              </Button>
+          <FormSection title='Features'>
+            <Field label='Features intro'>
+              <input className='input' value={draft.featuresIntro} onChange={(e) => set('featuresIntro', e.target.value)} />
+            </Field>
+            <LinesField label='Features' value={draft.features} onChange={(v) => set('features', v)} />
+          </FormSection>
+
+          <FormSection title='Media'>
+            <ImageField label='Cover image' value={draft.coverImage} onChange={(v) => set('coverImage', v)} />
+            <GalleryField label='Gallery' value={draft.images} onChange={(v) => set('images', v)} />
+          </FormSection>
+
+          <FormSection title='Links'>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <Field label='Website URL'>
+                <input type='url' className='input' placeholder='https://' value={draft.websiteUrl ?? ''} onChange={(e) => set('websiteUrl', e.target.value)} />
+              </Field>
+              <Field label='Invest URL'>
+                <input type='url' className='input' placeholder='https://' value={draft.investUrl ?? ''} onChange={(e) => set('investUrl', e.target.value)} />
+              </Field>
             </div>
-          </form>
-        </Modal>
+          </FormSection>
+        </Drawer>
       )}
     </div>
   );

@@ -1,301 +1,304 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, Paginated } from '../lib/api';
+import { useMemo, useState } from 'react';
 import {
+  LuBriefcase,
+  LuCircleCheck,
+  LuCircleX,
+  LuExternalLink,
+  LuPencil,
+  LuPlus,
+  LuTrash2,
+} from 'react-icons/lu';
+import Drawer, { isDirty } from '../components/Drawer';
+import { useConfirm, useToast } from '../components/feedback';
+import { Row } from '../components/Row';
+import {
+  Badge,
   Button,
+  ChipsField,
+  EmptyState,
   ErrorNote,
   Field,
+  FilterTabs,
+  FormSection,
+  IconButton,
   LinesField,
-  Modal,
+  ListSkeleton,
   PageHeader,
-  inputClass,
+  SearchInput,
+  Toolbar,
 } from '../components/ui';
+import { api, errorMessage, SITE_URL } from '../lib/api';
+import { matches, pick } from '../lib/format';
+import { useList, useOpenNewFromQuery, useSession } from '../lib/session';
+import type { Project, Vacancy } from '../lib/types';
 
-interface Vacancy {
-  id: string;
-  title: string;
-  role: string;
-  summary: string;
-  fullDescription: string;
-  responsibilitiesIntro: string;
-  responsibilities: string[];
-  requirementsIntro: string;
-  requirements: string[];
-  skillSet: string[];
-  payType: string;
-  salaryRange: string;
-  status: string;
-  projectId?: string;
-  project?: { id: string; title: string };
-}
+type Draft = Omit<Vacancy, 'id' | 'project'> & { id?: string };
 
-interface ProjectOption {
-  id: string;
-  title: string;
-}
+const FIELDS = [
+  'title', 'role', 'summary', 'fullDescription', 'responsibilitiesIntro', 'responsibilities',
+  'requirementsIntro', 'requirements', 'skillSet', 'payType', 'salaryRange', 'status', 'projectId',
+] as const;
 
-const empty: Omit<Vacancy, 'id'> = {
-  title: '',
-  role: 'Backend',
-  summary: '',
-  fullDescription: '',
-  responsibilitiesIntro: '',
-  responsibilities: [],
-  requirementsIntro: '',
-  requirements: [],
-  skillSet: [],
-  payType: 'Hourly',
-  salaryRange: '',
-  status: 'open',
-  projectId: undefined,
+const EMPTY: Draft = {
+  title: '', role: '', summary: '', fullDescription: '', responsibilitiesIntro: '',
+  responsibilities: [], requirementsIntro: '', requirements: [], skillSet: [],
+  payType: 'Hourly', salaryRange: '', status: 'open', projectId: null,
 };
 
-const ROLES = ['Backend', 'Frontend', 'Graphics', 'Native Android', 'Native iOS', 'HR', 'Marketing'];
+const DEFAULT_ROLES = ['Backend', 'Frontend', 'Graphics', 'Native Android', 'Native iOS', 'HR', 'Marketing'];
+type Filter = 'all' | Vacancy['status'];
 
 export default function VacanciesPage() {
-  const [data, setData] = useState<Paginated<Vacancy> | null>(null);
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
-  const [editing, setEditing] = useState<Partial<Vacancy> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { items, loading, error, reload } = useList<Vacancy>('/vacancies/admin/all?limit=50');
+  const { items: projects } = useList<Project>('/projects?limit=50');
+  const { refreshStats } = useSession();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [filter, setFilter] = useState<Filter>('all');
+  const [query, setQuery] = useState('');
+  const [original, setOriginal] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    const [vacancies, projectList] = await Promise.all([
-      api<Paginated<Vacancy>>('/vacancies/admin/all?limit=50'),
-      api<Paginated<ProjectOption>>('/projects?limit=50'),
-    ]);
-    setData(vacancies);
-    setProjects(projectList.items);
-  }, []);
+  const open = (vacancy?: Vacancy) => {
+    const value: Draft = vacancy
+      ? { id: vacancy.id, ...pick({ ...EMPTY, ...vacancy, projectId: vacancy.projectId ?? null }, FIELDS) }
+      : { ...EMPTY };
+    setOriginal(value);
+    setDraft(value);
+    setSaveError(null);
+  };
+  useOpenNewFromQuery(() => open());
 
-  useEffect(() => {
-    load().catch((e) => setError(e.message));
-  }, [load]);
+  const roles = useMemo(() => [...new Set([...DEFAULT_ROLES, ...items.map((v) => v.role)])].sort(), [items]);
+  const visible = items.filter(
+    (v) => (filter === 'all' || v.status === filter) && matches(query, v.title, v.role, v.project?.title),
+  );
+  const count = (f: Filter) => (f === 'all' ? items.length : items.filter((v) => v.status === f).length);
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => (d ? { ...d, [key]: value } : d));
+
+  const afterChange = () => {
+    reload();
+    refreshStats();
+  };
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!draft) return;
     setSaving(true);
-    setError(null);
+    setSaveError(null);
     try {
-      const body = JSON.stringify({
-        ...editing,
-        id: undefined,
-        project: undefined,
-        projectId: editing.projectId || undefined,
-      });
-      if (editing.id) {
-        await api(`/vacancies/${editing.id}`, { method: 'PATCH', body });
-      } else {
-        await api('/vacancies', { method: 'POST', body });
-      }
-      setEditing(null);
-      await load();
+      const body = JSON.stringify(pick(draft, FIELDS));
+      if (draft.id) await api(`/vacancies/${draft.id}`, { method: 'PATCH', body });
+      else await api('/vacancies', { method: 'POST', body });
+      toast(draft.id ? `“${draft.title}” saved.` : `“${draft.title}” posted.`);
+      setDraft(null);
+      afterChange();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed');
+      setSaveError(errorMessage(err, 'Save failed'));
     } finally {
       setSaving(false);
     }
   };
 
+  const toggleStatus = async (vacancy: Vacancy) => {
+    const next = vacancy.status === 'open' ? 'closed' : 'open';
+    try {
+      await api(`/vacancies/${vacancy.id}`, { method: 'PATCH', body: JSON.stringify({ status: next }) });
+      toast(next === 'open' ? `“${vacancy.title}” reopened.` : `“${vacancy.title}” closed — hidden from the site.`);
+      afterChange();
+    } catch (err) {
+      toast(errorMessage(err, 'Update failed'), 'error');
+    }
+  };
+
   const remove = async (vacancy: Vacancy) => {
-    if (!confirm(`Delete "${vacancy.title}"?`)) return;
-    await api(`/vacancies/${vacancy.id}`, { method: 'DELETE' });
-    await load();
+    const ok = await confirm({
+      title: `Delete “${vacancy.title}”?`,
+      message: 'Applications already received for this role will be deleted too. To just hide it, close the role instead.',
+      confirmLabel: 'Delete vacancy',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/vacancies/${vacancy.id}`, { method: 'DELETE' });
+      toast(`“${vacancy.title}” deleted.`);
+      afterChange();
+    } catch (err) {
+      toast(errorMessage(err, 'Delete failed'), 'error');
+    }
   };
 
   return (
     <div>
       <PageHeader
-        title="Vacancies"
-        action={<Button onClick={() => setEditing({ ...empty })}>New Vacancy</Button>}
+        title='Vacancies'
+        description='Open roles listed on the Careers page and each project page.'
+        actions={
+          <Button onClick={() => open()}>
+            <LuPlus className='h-4 w-4' /> New vacancy
+          </Button>
+        }
       />
-      {!editing && <ErrorNote error={error} />}
+      <ErrorNote error={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-gray-100 text-xs uppercase text-gray-500">
-            <tr>
-              <th className="px-4 py-3">Title</th>
-              <th className="px-4 py-3">Role</th>
-              <th className="px-4 py-3">Project</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {data?.items.map((vacancy) => (
-              <tr key={vacancy.id} className="border-b border-gray-50">
-                <td className="px-4 py-3 font-medium">{vacancy.title}</td>
-                <td className="px-4 py-3">{vacancy.role}</td>
-                <td className="px-4 py-3">{vacancy.project?.title ?? '—'}</td>
-                <td className="px-4 py-3">
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                      vacancy.status === 'open'
-                        ? 'bg-green-50 text-green-700'
-                        : 'bg-gray-100 text-gray-600'
-                    }`}
-                  >
+      <Toolbar>
+        <FilterTabs<Filter>
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { label: 'All', value: 'all', count: count('all') },
+            { label: 'Open', value: 'open', count: count('open') },
+            { label: 'Closed', value: 'closed', count: count('closed') },
+          ]}
+        />
+        <SearchInput value={query} onChange={setQuery} placeholder='Search roles' />
+      </Toolbar>
+
+      {loading ? (
+        <ListSkeleton />
+      ) : visible.length === 0 ? (
+        <EmptyState
+          icon={LuBriefcase}
+          title={items.length ? 'No matching vacancies' : 'No vacancies yet'}
+          description={items.length ? 'Try a different filter or search.' : 'Post a role to start receiving applications.'}
+          action={!items.length && <Button onClick={() => open()}>New vacancy</Button>}
+        />
+      ) : (
+        <ul className='space-y-2.5'>
+          {visible.map((vacancy, i) => (
+            <Row
+              key={vacancy.id}
+              index={i}
+              onOpen={() => open(vacancy)}
+              thumb={
+                <span className='flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/[0.08] text-primary'>
+                  <LuBriefcase className='h-5 w-5' />
+                </span>
+              }
+              title={vacancy.title}
+              subtitle={[vacancy.salaryRange, vacancy.payType].filter(Boolean).join(' · ')}
+              meta={
+                <>
+                  <Badge tone={vacancy.status === 'open' ? 'green' : 'slate'} dot>
                     {vacancy.status}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" onClick={() => setEditing(vacancy)}>
-                    Edit
-                  </Button>{' '}
-                  <Button variant="danger" onClick={() => remove(vacancy)}>
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {data && data.items.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-4 py-10 text-center text-gray-500">
-                  No vacancies yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {editing && (
-        <Modal
-          title={editing.id ? 'Edit Vacancy' : 'New Vacancy'}
-          onClose={() => setEditing(null)}
-        >
-          <ErrorNote error={error} />
-          <form onSubmit={save} className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Title">
-                <input
-                  className={inputClass}
-                  value={editing.title ?? ''}
-                  onChange={(e) => setEditing({ ...editing, title: e.target.value })}
-                  required
-                />
-              </Field>
-              <Field label="Role category">
-                <select
-                  className={inputClass}
-                  value={editing.role ?? 'Backend'}
-                  onChange={(e) => setEditing({ ...editing, role: e.target.value })}
-                >
-                  {ROLES.map((role) => (
-                    <option key={role} value={role}>
-                      {role}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Project">
-                <select
-                  className={inputClass}
-                  value={editing.projectId ?? ''}
-                  onChange={(e) =>
-                    setEditing({ ...editing, projectId: e.target.value || undefined })
-                  }
-                >
-                  <option value="">— None —</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.title}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Status">
-                <select
-                  className={inputClass}
-                  value={editing.status ?? 'open'}
-                  onChange={(e) => setEditing({ ...editing, status: e.target.value })}
-                >
-                  <option value="open">Open</option>
-                  <option value="closed">Closed</option>
-                </select>
-              </Field>
-              <Field label="Pay type">
-                <input
-                  className={inputClass}
-                  value={editing.payType ?? ''}
-                  onChange={(e) => setEditing({ ...editing, payType: e.target.value })}
-                />
-              </Field>
-              <Field label="Salary range">
-                <input
-                  className={inputClass}
-                  value={editing.salaryRange ?? ''}
-                  onChange={(e) => setEditing({ ...editing, salaryRange: e.target.value })}
-                  placeholder="₦800k – ₦1.2m / month"
-                />
-              </Field>
-            </div>
-
-            <Field label="Summary (card blurb)">
-              <textarea
-                className={`${inputClass} min-h-[60px]`}
-                value={editing.summary ?? ''}
-                onChange={(e) => setEditing({ ...editing, summary: e.target.value })}
-                required
-              />
-            </Field>
-            <Field label="Full job description">
-              <textarea
-                className={`${inputClass} min-h-[90px]`}
-                value={editing.fullDescription ?? ''}
-                onChange={(e) =>
-                  setEditing({ ...editing, fullDescription: e.target.value })
-                }
-              />
-            </Field>
-            <LinesField
-              label="Skill set"
-              value={editing.skillSet ?? []}
-              onChange={(skillSet) => setEditing({ ...editing, skillSet })}
-              placeholder={'JavaScript\nReact.js\nNode.js'}
-            />
-            <Field label="Responsibilities intro">
-              <input
-                className={inputClass}
-                value={editing.responsibilitiesIntro ?? ''}
-                onChange={(e) =>
-                  setEditing({ ...editing, responsibilitiesIntro: e.target.value })
-                }
-              />
-            </Field>
-            <LinesField
-              label="Responsibilities"
-              value={editing.responsibilities ?? []}
-              onChange={(responsibilities) =>
-                setEditing({ ...editing, responsibilities })
+                  </Badge>
+                  <Badge tone='pink'>{vacancy.role}</Badge>
+                  {vacancy.project ? <Badge tone='violet'>{vacancy.project.title}</Badge> : <Badge>No project</Badge>}
+                </>
+              }
+              actions={
+                <>
+                  {vacancy.status === 'open' && (
+                    <a
+                      href={`${SITE_URL}/careers/${vacancy.id}`}
+                      target='_blank'
+                      rel='noopener noreferrer'
+                      aria-label='View on site'
+                      title='View on site'
+                      className='hidden h-9 w-9 items-center justify-center rounded-xl text-ink/45 hover:bg-ink/[0.05] hover:text-ink sm:flex'
+                    >
+                      <LuExternalLink className='h-4 w-4' />
+                    </a>
+                  )}
+                  <IconButton
+                    label={vacancy.status === 'open' ? 'Close role' : 'Reopen role'}
+                    onClick={() => toggleStatus(vacancy)}
+                  >
+                    {vacancy.status === 'open' ? <LuCircleX className='h-4 w-4' /> : <LuCircleCheck className='h-4 w-4' />}
+                  </IconButton>
+                  <IconButton label='Edit' onClick={() => open(vacancy)}>
+                    <LuPencil className='h-4 w-4' />
+                  </IconButton>
+                  <IconButton label='Delete' tone='danger' onClick={() => remove(vacancy)}>
+                    <LuTrash2 className='h-4 w-4' />
+                  </IconButton>
+                </>
               }
             />
-            <Field label="Requirements intro">
-              <input
-                className={inputClass}
-                value={editing.requirementsIntro ?? ''}
-                onChange={(e) =>
-                  setEditing({ ...editing, requirementsIntro: e.target.value })
-                }
-              />
-            </Field>
-            <LinesField
-              label="Requirements"
-              value={editing.requirements ?? []}
-              onChange={(requirements) => setEditing({ ...editing, requirements })}
-            />
+          ))}
+        </ul>
+      )}
 
-            <div className="flex justify-end gap-3 pt-2">
-              <Button type="button" variant="ghost" onClick={() => setEditing(null)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={saving}>
-                {saving ? 'Saving…' : 'Save'}
-              </Button>
+      {draft && (
+        <Drawer
+          title={draft.id ? 'Edit vacancy' : 'New vacancy'}
+          subtitle={draft.id ? draft.title : 'Open roles appear on the Careers page once saved.'}
+          dirty={isDirty(original, draft)}
+          saving={saving}
+          error={saveError}
+          onClose={() => setDraft(null)}
+          onSubmit={save}
+          submitLabel={draft.id ? 'Save changes' : 'Post vacancy'}
+        >
+          <FormSection title='Basics'>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <Field label='Job title' className='sm:col-span-2'>
+                <input className='input' value={draft.title} onChange={(e) => set('title', e.target.value)} required minLength={2} />
+              </Field>
+              <Field label='Role category' hint='Used by the Careers page filter.'>
+                <input className='input' list='roles' value={draft.role} onChange={(e) => set('role', e.target.value)} required />
+                <datalist id='roles'>
+                  {roles.map((r) => (
+                    <option key={r} value={r} />
+                  ))}
+                </datalist>
+              </Field>
+              <Field label='Project'>
+                <select className='input' value={draft.projectId ?? ''} onChange={(e) => set('projectId', e.target.value || null)}>
+                  <option value=''>— No project —</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label='Status'>
+                <select className='input' value={draft.status} onChange={(e) => set('status', e.target.value as Vacancy['status'])}>
+                  <option value='open'>Open — listed on the site</option>
+                  <option value='closed'>Closed — hidden</option>
+                </select>
+              </Field>
+              <Field label='Pay type'>
+                <input className='input' list='pay-types' value={draft.payType} onChange={(e) => set('payType', e.target.value)} />
+                <datalist id='pay-types'>
+                  {['Hourly', 'Monthly', 'Contract', 'Project-based'].map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+              </Field>
+              <Field label='Salary range' className='sm:col-span-2'>
+                <input className='input' placeholder='₦800k – ₦1.2m / month' value={draft.salaryRange} onChange={(e) => set('salaryRange', e.target.value)} />
+              </Field>
             </div>
-          </form>
-        </Modal>
+          </FormSection>
+
+          <FormSection title='Description'>
+            <Field label='Summary' hint='Shown on the role card.'>
+              <textarea className='input min-h-[80px] resize-y' value={draft.summary} onChange={(e) => set('summary', e.target.value)} required />
+            </Field>
+            <Field label='Full job description'>
+              <textarea className='input min-h-[140px] resize-y leading-relaxed' value={draft.fullDescription} onChange={(e) => set('fullDescription', e.target.value)} />
+            </Field>
+            <ChipsField label='Skill set' value={draft.skillSet} onChange={(v) => set('skillSet', v)} placeholder='e.g. React — press Enter to add' />
+          </FormSection>
+
+          <FormSection title='Responsibilities'>
+            <Field label='Intro'>
+              <input className='input' value={draft.responsibilitiesIntro} onChange={(e) => set('responsibilitiesIntro', e.target.value)} />
+            </Field>
+            <LinesField label='Responsibilities' value={draft.responsibilities} onChange={(v) => set('responsibilities', v)} />
+          </FormSection>
+
+          <FormSection title='Requirements'>
+            <Field label='Intro'>
+              <input className='input' value={draft.requirementsIntro} onChange={(e) => set('requirementsIntro', e.target.value)} />
+            </Field>
+            <LinesField label='Requirements' value={draft.requirements} onChange={(v) => set('requirements', v)} />
+          </FormSection>
+        </Drawer>
       )}
     </div>
   );

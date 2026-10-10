@@ -1,7 +1,75 @@
+@font-face {
+  font-family: 'Urbanist';
+  src: url('/fonts/Urbanist-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Urbanist';
+  src: url('/fonts/Urbanist-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Urbanist';
+  src: url('/fonts/Urbanist-SemiBold.ttf') format('truetype');
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Urbanist';
+  src: url('/fonts/Urbanist-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Urbanist';
+  src: url('/fonts/Urbanist-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-gray-50 text-gray-900;
+@layer base {
+  body {
+    @apply bg-surface text-ink antialiased;
+  }
+
+  ::selection {
+    background: rgba(147, 31, 90, 0.18);
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary/50 ring-offset-2;
+  }
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-xl border border-ink/10 bg-white px-3.5 py-2.5 text-sm text-ink transition-colors placeholder:text-ink/35 focus:border-primary/50 focus:outline-none focus:ring-4 focus:ring-primary/10 disabled:bg-surface;
+  }
+
+  .card {
+    @apply rounded-2xl border border-ink/[0.06] bg-white shadow-soft;
+  }
+
+  .label {
+    @apply mb-1.5 block text-[13px] font-bold text-ink/70;
+  }
+
+  .hint {
+    @apply mt-1.5 block text-xs text-ink/45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
